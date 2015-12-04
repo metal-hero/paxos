@@ -9,6 +9,8 @@ import random
 import pickle
 
 DECREES = [['London','Paris','Madrid','Rome'],['Astana','Moscow','Stambul'],['Tokyo','Seul','Pekin']]
+ # Chose one of each part one from Europe, one from Eurasia, one from Asia
+ # For, example ['London', 'Astana','Tokyo']
 
 parameters = pika.ConnectionParameters(
         'localhost',
@@ -21,16 +23,16 @@ class Priest(object):
     m = 5 # Number of Priests
     def __init__(self, node_id):
         try:
-            self = pickle.load( open( str(node_id)+"paxos_save.p", "rb" ) )
-        except: 
-            self.node_id = str(node_id) # self id
+            self.master, self.last_vote, self.last_ballot, self.curr_ballot, self.promise_ballot, self.E, self.timekeys, self.ballots, self.votes, self.quorum = pickle.load( open( str(node_id)+"paxos_save.p", "rb" ) )
+        except:  
             self.master = None # id of Master
             self.last_vote = [] # List of votes
             self.last_ballot = None # id(time) of last ballot for this node
             self.curr_ballot = None # id(time) of current ballot
-            self.E = 500 # epsilon - delay for action
-            if int(self.node_id) == 1:
-                self.master = self.node_id
+            self.promise_ballot = None
+            self.E = 50 # epsilon - delay for action
+            if int(node_id) == 1:
+                self.master = str(node_id)
             self.timekeys = [] # Times for checking Master
             self.ballots = [] # List of Quorums previous ballots (* when master role)
             self.votes = []  # List of Quorums previous votes (* when master role)
@@ -39,33 +41,34 @@ class Priest(object):
             for i in range(Priest.m+1):
                 self.timekeys.append(None)
 
-            # setup channel
-            self.connection = pika.BlockingConnection(parameters)
-            self.channel = self.connection.channel()
-            self.channel.queue_declare(queue='find_master' + str(node_id))
-            self.channel.queue_declare(queue='here_master' + str(node_id))
-            self.channel.queue_declare(queue='next_ballot' + str(node_id))
-            self.channel.queue_declare(queue='get_last_vote' + str(node_id))
-            self.channel.queue_declare(queue='begin_ballot' + str(node_id))
-            self.channel.queue_declare(queue='get_voted' + str(node_id))
-            self.channel.basic_consume(self.here_master_callback,
-                                  queue='here_master' + str(node_id),
-                                  no_ack=True)
-            self.channel.basic_consume(self.find_master_callback,
-                                  queue='find_master' + str(node_id),
-                                  no_ack=True)
-            self.channel.basic_consume(self.next_ballot_callback,
-                                  queue='next_ballot' + str(node_id),
-                                  no_ack=True)
-            self.channel.basic_consume(self.get_last_vote_callback,
-                                  queue='get_last_vote' + str(node_id),
-                                  no_ack=True)
-            self.channel.basic_consume(self.begin_ballot_callback,
-                                  queue='begin_ballot' + str(node_id),
-                                  no_ack=True)
-            self.channel.basic_consume(self.get_voted_callback,
-                                  queue='get_voted' + str(node_id),
-                                  no_ack=True)
+        self.node_id = str(node_id) # self id
+        # setup channel
+        self.connection = pika.BlockingConnection(parameters)
+        self.channel = self.connection.channel()
+        self.channel.queue_declare(queue='find_master' + str(node_id))
+        self.channel.queue_declare(queue='here_master' + str(node_id))
+        self.channel.queue_declare(queue='next_ballot' + str(node_id))
+        self.channel.queue_declare(queue='get_last_vote' + str(node_id))
+        self.channel.queue_declare(queue='begin_ballot' + str(node_id))
+        self.channel.queue_declare(queue='get_voted' + str(node_id))
+        self.channel.basic_consume(self.here_master_callback,
+                              queue='here_master' + str(node_id),
+                              no_ack=True)
+        self.channel.basic_consume(self.find_master_callback,
+                              queue='find_master' + str(node_id),
+                              no_ack=True)
+        self.channel.basic_consume(self.next_ballot_callback,
+                              queue='next_ballot' + str(node_id),
+                              no_ack=True)
+        self.channel.basic_consume(self.get_last_vote_callback,
+                              queue='get_last_vote' + str(node_id),
+                              no_ack=True)
+        self.channel.basic_consume(self.begin_ballot_callback,
+                              queue='begin_ballot' + str(node_id),
+                              no_ack=True)
+        self.channel.basic_consume(self.get_voted_callback,
+                              queue='get_voted' + str(node_id),
+                              no_ack=True)
 
         print "Searching"
         threading.Thread(target=self.run_find_master).start()
@@ -73,7 +76,7 @@ class Priest(object):
         self.channel.start_consuming()
 
 
-    def run_next_ballot(self,channel):
+    def run_next_ballot(self):
         self.last_ballot = self.curr_ballot
         self.curr_ballot = time.time()
         data = {'new_ballot': self.curr_ballot, 'master': self.master}
@@ -81,7 +84,7 @@ class Priest(object):
         self.ballots = []
         self.quorum = []
         for i in range(1,Priest.m+1): # Send to every Note by BroadCast
-            channel.basic_publish(exchange='',
+            self.channel.basic_publish(exchange='',
                                   routing_key='next_ballot'+str(i),
                                   body=json.dumps(data))
 
@@ -94,16 +97,17 @@ class Priest(object):
             self.curr_ballot = data['new_ballot']
             self.promise_ballot = self.curr_ballot
             data = {'last_vote': self.last_vote, 'last_ballot': self.last_ballot, 'priest': self.node_id, 'curr_ballot': self.curr_ballot}
+            print data
             channel.basic_publish(exchange='',
                                   routing_key='get_last_vote'+str(self.master),
                                   body=json.dumps(data))
         else:
-            print 'I promised to '+self.curr_ballot
+            print 'I promised to '+ str(self.curr_ballot)
 
 
     def get_last_vote_callback(self, channel, _, _2, body):
         data = json.loads(body)
-        if data['curr_ballot'] == self.curr_ballot and time.time() - self.curr_ballot > self.E:
+        if data['curr_ballot'] == self.curr_ballot and time.time() - self.curr_ballot < self.E:
             self.votes.append(data['last_vote'])
             self.ballots.append(data['last_ballot'])
             self.quorum.append(data['priest'])
@@ -125,8 +129,9 @@ class Priest(object):
                 if self.master == self.node_id:
                     print 'Node '+ self.node_id + ' is Master !'
                 else:
-                    print 'Node' + self.node_id + ' is NEW Master !'
+                    print 'Node ' + self.node_id + ' is NEW Master !'
                     self.master = self.node_id
+                if len(self.quorum)<= Priest.m/2:
                     self.run_next_ballot()
             else:
                 self.master = None
@@ -149,7 +154,8 @@ class Priest(object):
                     #print str(i) + ' run find master'
                 except:
                     continue
-            pickle.dump( self, open( str(node_id)+"save.p", "wb" )) 
+            pickle.dump( (self.master, self.last_vote, self.last_ballot, self.curr_ballot, self.E, self.timekeys, self.ballots, self.votes, self.quorum)
+                        ,  open( str(self.node_id)+"save.p", "wb" )) 
             time.sleep(1)
 
     def find_master_callback(self, channel, _, _2, body):
@@ -172,9 +178,12 @@ class Priest(object):
                 if max_ballot is None or self.ballots[i] > max_ballot:
                     max_ballot = self.ballots[i]
                     super_last_vote = self.votes[i] 
-            if max_ballot is None or super_last_vote is None:
+            print 'MAX BALLOT => ' 
+            print max_ballot
+            if max_ballot is None or super_last_vote is None or super_last_vote == []:
                 for i in range(len(DECREES)):
                     super_last_vote.append(DECREES[i][random.randint(0, len(DECREES[i])-1)])
+                    print DECREES[i][random.randint(0, len(DECREES[i])-1)]
             print 'SUPER LAST VOTE => '
             print super_last_vote
             for i in self.quorum:
@@ -188,7 +197,7 @@ class Priest(object):
     def begin_ballot_callback(self, channel, _, _2, body):
         self.last_vote = json.loads(body)
         print json.loads(body)
-        print self.node_id + ' / last vote ' + self.last_vote 
+        print self.node_id + ' / last vote ' + str(self.last_vote) 
         channel.basic_publish(exchange='',
                               routing_key='get_voted'+str(self.master),
                               body=self.node_id)
